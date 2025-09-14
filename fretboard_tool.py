@@ -3,10 +3,14 @@
 # Readable fretboard with vertical fret lines, bold nut, fret markers.
 # High strings on TOP, wound strings (low E) on BOTTOM.
 # Supports: full diatonic scales, pentatonics, chord-tone highlighting by degree,
-# and approximate CAGED windows.
+# approximate CAGED windows, and STRICT pentatonic CAGED (5 canonical boxes).
+#
+# New:
+# --boxes pent-caged  → draws the 5 standard pentatonic boxes (minor/major oriented)
+# --pent-orient minor|major (default minor) → which root to align Pattern 1 to
 
 import argparse
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional, Tuple
 
 # ---------------- Config / constants ----------------
 
@@ -82,28 +86,17 @@ def degree_index_from_roman(roman: str, mode: str) -> Optional[int]:
     """Return 0..6 for the diatonic degree; supports '°' optional and case-insensitive."""
     roman = roman.strip()
     base = roman.replace("°", "")
-    if mode == "major":
-        arr = DEGREE_TO_ROMAN_MAJOR
-    else:
-        arr = DEGREE_TO_ROMAN_NMIN
+    arr = DEGREE_TO_ROMAN_MAJOR if mode == "major" else DEGREE_TO_ROMAN_NMIN
     for i, r in enumerate(arr):
         if base.lower() == r.replace("°","").lower():
             return i
     return None
 
 def diatonic_triads(scale7: List[str]) -> List[List[str]]:
-    """Return seven diatonic triads (1-3-5) as spelled notes."""
-    triads = []
-    for i in range(7):
-        triads.append([ scale7[i], scale7[(i+2)%7], scale7[(i+4)%7] ])
-    return triads
+    return [[ scale7[i], scale7[(i+2)%7], scale7[(i+4)%7] ] for i in range(7)]
 
 def diatonic_sevenths(scale7: List[str]) -> List[List[str]]:
-    """Return seven diatonic seventh chords (1-3-5-7) as spelled notes."""
-    sevenths = []
-    for i in range(7):
-        sevenths.append([ scale7[i], scale7[(i+2)%7], scale7[(i+4)%7], scale7[(i+6)%7] ])
-    return sevenths
+    return [[ scale7[i], scale7[(i+2)%7], scale7[(i+4)%7], scale7[(i+6)%7] ] for i in range(7)]
 
 def pc_of_note_name(name: str) -> int:
     L, a = parse_pitch(name)
@@ -112,7 +105,6 @@ def pc_of_note_name(name: str) -> int:
 # ---------------- Label maps (what to show on grid) ----------------
 
 def degree_map_diatonic(scale7: List[str]) -> Dict[int, str]:
-    """Full diatonic scale: {pc: 'R' or '2'..'7'}."""
     m = {}
     for i, note in enumerate(scale7, start=1):
         L, a = parse_pitch(note)
@@ -121,7 +113,7 @@ def degree_map_diatonic(scale7: List[str]) -> Dict[int, str]:
     return m
 
 def label_map_pentatonic(root: str, mode: str, use_unicode_flat: bool) -> Dict[int, str]:
-    """Pent chosen by mode: major→major pent, natural_minor→minor pent."""
+    """Auto flavor based on mode: major→major pent, natural_minor→minor pent."""
     letter, acc = parse_pitch(root)
     root_pc = pitch_to_pc(letter, acc)
     if mode == "major":
@@ -131,11 +123,7 @@ def label_map_pentatonic(root: str, mode: str, use_unicode_flat: bool) -> Dict[i
         semis = PENT_MINOR_SEMIS
         labels = ["R", "♭3" if use_unicode_flat else "b3", "4", "5",
                   "♭7" if use_unicode_flat else "b7"]
-    m = {}
-    for s, lab in zip(semis, labels):
-        pc = (root_pc + s) % 12
-        m[pc] = lab
-    return m
+    return {(root_pc+s)%12: lab for s, lab in zip(semis, labels)}
 
 def label_map_pent_forced(root: str, pent: str, use_unicode_flat: bool) -> Dict[int, str]:
     letter, acc = parse_pitch(root)
@@ -147,136 +135,77 @@ def label_map_pent_forced(root: str, pent: str, use_unicode_flat: bool) -> Dict[
         semis = PENT_MINOR_SEMIS
         labels = ["R", "♭3" if use_unicode_flat else "b3", "4", "5",
                   "♭7" if use_unicode_flat else "b7"]
-    m = {}
-    for s, lab in zip(semis, labels):
-        pc = (root_pc + s) % 12
-        m[pc] = lab
-    return m
+    return {(root_pc+s)%12: lab for s, lab in zip(semis, labels)}
 
 def label_map_chord_tones(scale7: List[str], degree_idx: int,
                           tones: str, use_unicode_flat: bool) -> Dict[int, str]:
-    """
-    Build {pc: label} for a diatonic chord on degree_idx.
-    tones: 'triad' or 'seventh'
-    Labels show R, and 3 / b3, 5, and 7 / b7 based on semitone distances from the chord root.
-    """
     chord = diatonic_sevenths(scale7)[degree_idx] if tones == "seventh" else diatonic_triads(scale7)[degree_idx]
     root_pc = pc_of_note_name(chord[0])
-    pcs = []
+    pcs, labels = [], []
     for note in chord:
-        pcs.append(pc_of_note_name(note))
-    # interval labels
-    labels = []
-    for pc in pcs:
+        pc = pc_of_note_name(note)
+        pcs.append(pc)
         semis = (pc - root_pc) % 12
-        if semis == 0:
-            labels.append("R")
-        elif semis == 3:
-            labels.append("♭3" if use_unicode_flat else "b3")
-        elif semis == 4:
-            labels.append("3")
-        elif semis == 7:
-            labels.append("5")
-        elif semis == 10:
-            labels.append("♭7" if use_unicode_flat else "b7")
-        elif semis == 11:
-            labels.append("7")
-        else:
-            # rare (e.g., diminished fifth or something off-scale if presented),
-            # but we won't encounter here for standard major/natural minor diatonic sevenths
-            labels.append("?")
-    return { pc: lab for pc, lab in zip(pcs, labels) }
+        if semis == 0: labels.append("R")
+        elif semis == 3: labels.append("♭3" if use_unicode_flat else "b3")
+        elif semis == 4: labels.append("3")
+        elif semis == 7: labels.append("5")
+        elif semis == 10: labels.append("♭7" if use_unicode_flat else "b7")
+        elif semis == 11: labels.append("7")
+        else: labels.append("?")
+    return {pc: lab for pc, lab in zip(pcs, labels)}
 
 # ---------------- Grid construction ----------------
 
-def build_grid(pc_to_label: Dict[int, str], frets: int) -> List[List[Optional[str]]]:
-    """Return 6 rows of length frets+1 with labels or None.
-       Row 0 = string 6 (low E), Row 5 = string 1 (high E)."""
+def build_grid(pc_to_label: Dict[int, str], frets: int):
     rows = []
     for s in TUNING:
         open_pc = pc_of_note_name(s)
         row = []
         for f in range(frets+1):
             pc = (open_pc + f) % 12
-            row.append(pc_to_label.get(pc))  # None or label like 'R','3','b7'
+            row.append(pc_to_label.get(pc))
         rows.append(row)
     return rows
 
 def cell_text(label: Optional[str], pad=2):
-    if label is None:
-        return " " * pad
-    # Keep width ~2 chars (R, 2..7, b3/♭3, b7/♭7). ASCII mode avoids wide glyphs.
-    if len(label) >= pad:
-        return label[:pad]
+    if label is None: return " " * pad
+    if len(label) >= pad: return label[:pad]
     return label + " " * (pad - len(label))
 
 # ---------------- Rendering (single grid) ----------------
 
 def _header_and_markers_unicode(frets: int):
     NUT = "║"
-    header = ["    ", f"{NUT} "]
-    for f in range(1, frets+1):
-        header.append(f"{f:>2} ")
-        if f < frets:
-            header.append(" ")
-    header_line = "".join(header)
-    marker = ["    ", f"{NUT} "]
-    for f in range(1, frets+1):
-        mark = "•" if f in FRET_MARKERS else " "
-        marker.append(f" {mark} ")
-        if f < frets:
-            marker.append(" ")
-    return NUT, header_line, "".join(marker)
+    header = ["    ", f"{NUT} "] + [f"{f:>2} " + (" " if f<frets else "") for f in range(1, frets+1)]
+    marker = ["    ", f"{NUT} "] + [(f" • " if f in FRET_MARKERS else "   ") + (" " if f<frets else "") for f in range(1, frets+1)]
+    return NUT, "".join(header), "".join(marker)
 
 def _header_and_markers_ascii(frets: int):
     NUT = "||"
-    header = ["    ", f"{NUT} "]
-    for f in range(1, frets+1):
-        header.append(f"{f:>2} ")
-        if f < frets:
-            header.append(" ")
-    marker = ["    ", f"{NUT} "]
-    for f in range(1, frets+1):
-        mark = "*" if f in FRET_MARKERS else " "
-        marker.append(f" {mark} ")
-        if f < frets:
-            marker.append(" ")
+    header = ["    ", f"{NUT} "] + [f"{f:>2} " + (" " if f<frets else "") for f in range(1, frets+1)]
+    marker = ["    ", f"{NUT} "] + [(f" * " if f in FRET_MARKERS else "   ") + (" " if f<frets else "") for f in range(1, frets+1)]
     return NUT, "".join(header), "".join(marker)
 
-def render_single_unicode(scale7: List[str], grid, frets: int, legend_lines: List[str]) -> str:
-    V = "│"
-    NUT, header_line, marker_line = _header_and_markers_unicode(frets)
-    # Lines for each string: HIGH to LOW
+def render_single_unicode(scale7, grid, frets: int, legend_lines: List[str]) -> str:
+    V = "│"; NUT, header_line, marker_line = _header_and_markers_unicode(frets)
     lines = []
-    reversed_grid = list(reversed(grid))
-    reversed_tuning = list(reversed(TUNING))
-    for si, row in enumerate(reversed_grid):
+    for si, row in enumerate(reversed(grid)):
         string_num = si + 1
-        string_label = f"{string_num}({reversed_tuning[si]})"
+        string_label = f"{string_num}({TUNING[::-1][si]})"
         label = f"{string_label:<4}"
-        line = [label, NUT, cell_text(row[0]), V]
-        for f in range(1, frets+1):
-            line.append(cell_text(row[f]))
-            if f < frets:
-                line.append(V)
+        line = [label, NUT, cell_text(row[0]), V] + [cell_text(c)+(V if f<frets-1 else "") for f,c in enumerate(row[1:],1)]
         lines.append(" ".join(line))
     return "\n".join([header_line, marker_line] + lines + [""] + legend_lines)
 
-def render_single_ascii(scale7: List[str], grid, frets: int, legend_lines: List[str]) -> str:
-    V = "|"
-    NUT, header_line, marker_line = _header_and_markers_ascii(frets)
+def render_single_ascii(scale7, grid, frets: int, legend_lines: List[str]) -> str:
+    V = "|"; NUT, header_line, marker_line = _header_and_markers_ascii(frets)
     lines = []
-    reversed_grid = list(reversed(grid))
-    reversed_tuning = list(reversed(TUNING))
-    for si, row in enumerate(reversed_grid):
+    for si, row in enumerate(reversed(grid)):
         string_num = si + 1
-        string_label = f"{string_num}({reversed_tuning[si]})"
+        string_label = f"{string_num}({TUNING[::-1][si]})"
         label = f"{string_label:<4}"
-        line = [label, NUT, cell_text(row[0]), V]
-        for f in range(1, frets+1):
-            line.append(cell_text(row[f]))
-            if f < frets:
-                line.append(V)
+        line = [label, NUT, cell_text(row[0]), V] + [cell_text(c)+(V if f<frets-1 else "") for f,c in enumerate(row[1:],1)]
         lines.append(" ".join(line))
     return "\n".join([header_line, marker_line] + lines + [""] + legend_lines)
 
@@ -284,191 +213,192 @@ def render_single_ascii(scale7: List[str], grid, frets: int, legend_lines: List[
 
 def first_low_e_root_fret(root_pc: int) -> int:
     """Find the lowest fret (0..12) on low E with this pc."""
-    # Low E open is pc 4. Find smallest f such that (4+f)%12 == root_pc
     for f in range(0, 13):
         if (4 + f) % 12 == root_pc:
             return f
     return 0
 
-def caged_windows(start_fret: int, frets: int) -> List[Tuple[int,int,str]]:
-    """
-    Return five overlapping (start,end,label) windows across the neck.
-    Heuristic: 5 windows of ~4-5 frets each, starting near the first low-E root.
-    Labels follow C-A-G-E-D order.
-    """
-    # Keep windows within [0, frets]
-    # Center points spaced to cover ~12 frets with overlap
+def caged_windows(start_fret: int, frets: int, min_width: int = 5):
     centers = [start_fret + off for off in (0, 3, 5, 8, 10)]
-    windows = []
-    shapes = ["C","A","G","E","D"]
+    shapes = ["C", "A", "G", "E", "D"]
+    wins = []
     for c, sh in zip(centers, shapes):
-        s = max(0, c - 2)
-        e = min(frets, c + 2)
-        if e - s < 4 and e < frets:
-            e = min(frets, s + 4)
-        windows.append((s, e, sh))
-    return windows
+        half = max(1, min_width // 2)
+        s, e = c-half, c+half
+        if (e - s + 1) > min_width: e -= 1
+        if s < 0: e += -s; s = 0
+        if e > frets: s -= (e - frets); e = frets
+        s, e = max(0,s), min(frets,e)
+        if s > e: s = e
+        wins.append((s,e,sh))
+    return wins
 
 def slice_grid(grid, s: int, e: int):
-    """Slice columns [s..e] (inclusive) from a full grid."""
-    return [row[s:(e+1)] for row in grid]
+    return [row[s:e+1] for row in grid]
 
-def render_caged_unicode(scale7: List[str], grid, frets: int, root_pc: int, legend_lines: List[str]) -> str:
-    NUT_U, header_line_u, marker_line_u = _header_and_markers_unicode(frets)  # for styling lengths
+def render_caged_unicode(scale7, grid, frets: int, root_pc: int, legend_lines):
+    NUT, V = "║", "│"
     start = first_low_e_root_fret(root_pc)
     wins = caged_windows(start, frets)
     blocks = []
-    V = "│"; NUT = "║"
     for (s,e,shape) in wins:
-        # Header per window
-        hdr = [f"   [{shape} shape]  frets {s}–{e}"]
-        # Build mini header/marker for this slice
-        header = ["    ", f"{NUT} "]
-        for f in range(s if s>0 else 1, e+1):
-            # show absolute fret numbers
-            header.append(f"{f:>2} ")
-            if f < e:
-                header.append(" ")
-        header_line = "".join(header)
-        marker = ["    ", f"{NUT} "]
-        for f in range(s if s>0 else 1, e+1):
-            mark = "•" if f in FRET_MARKERS else " "
-            marker.append(f" {mark} ")
-            if f < e:
-                marker.append(" ")
-        marker_line = "".join(marker)
-
-        # Slice grid and render lines (HIGH to LOW)
+        header = ["    ", f"{NUT} "] + [f"{f:>2} " + (" " if f<e else "") for f in range(max(1,s), e+1)]
+        marker = ["    ", f"{NUT} "] + [(f" • " if f in FRET_MARKERS else "   ") + (" " if f<e else "") for f in range(max(1,s), e+1)]
         sub = slice_grid(grid, s, e)
-        lines = []
-        reversed_sub = list(reversed(sub))
-        reversed_tuning = list(reversed(TUNING))
-        for si, row in enumerate(reversed_sub):
-            string_num = si + 1
-            string_label = f"{string_num}({reversed_tuning[si]})"
-            label = f"{string_label:<4}"
-            # nut only prints as column 0; within slices, we still print vertical bar
-            line = [label, NUT, cell_text(row[0]), V]
-            for col in range(1, len(row)):
-                line.append(cell_text(row[col]))
-                if col < len(row)-1:
-                    line.append(V)
+        lines = [f"   [{shape} shape]  frets {s}–{e}", "".join(header), "".join(marker)]
+        for si,row in enumerate(reversed(sub)):
+            string_num = si+1
+            string_label = f"{string_num}({TUNING[::-1][si]})"
+            line = [f"{string_label:<4}", NUT, cell_text(row[0]), V] + [cell_text(c)+(V if f<len(row)-2 else "") for f,c in enumerate(row[1:],1)]
             lines.append(" ".join(line))
+        blocks.append("\n".join(lines)+"\n")
+    return "\n".join(blocks+legend_lines)
 
-        blocks.append("\n".join(hdr + [header_line, marker_line] + lines + [""]))
-    return "\n".join(blocks + legend_lines)
-
-def render_caged_ascii(scale7: List[str], grid, frets: int, root_pc: int, legend_lines: List[str]) -> str:
-    NUT_A, header_line_a, marker_line_a = _header_and_markers_ascii(frets)
+def render_caged_ascii(scale7, grid, frets: int, root_pc: int, legend_lines):
+    NUT, V = "||", "|"
     start = first_low_e_root_fret(root_pc)
     wins = caged_windows(start, frets)
     blocks = []
-    V = "|"; NUT = "||"
     for (s,e,shape) in wins:
-        hdr = [f"   [{shape} shape]  frets {s}–{e}"]
-        header = ["    ", f"{NUT} "]
-        for f in range(s if s>0 else 1, e+1):
-            header.append(f"{f:>2} ")
-            if f < e:
-                header.append(" ")
-        header_line = "".join(header)
-        marker = ["    ", f"{NUT} "]
-        for f in range(s if s>0 else 1, e+1):
-            mark = "*" if f in FRET_MARKERS else " "
-            marker.append(f" {mark} ")
-            if f < e:
-                marker.append(" ")
-        marker_line = "".join(marker)
-
+        header = ["    ", f"{NUT} "] + [f"{f:>2} " + (" " if f<e else "") for f in range(max(1,s), e+1)]
+        marker = ["    ", f"{NUT} "] + [(f" * " if f in FRET_MARKERS else "   ") + (" " if f<e else "") for f in range(max(1,s), e+1)]
         sub = slice_grid(grid, s, e)
-        lines = []
-        reversed_sub = list(reversed(sub))
-        reversed_tuning = list(reversed(TUNING))
-        for si, row in enumerate(reversed_sub):
-            string_num = si + 1
-            string_label = f"{string_num}({reversed_tuning[si]})"
-            label = f"{string_label:<4}"
-            line = [label, NUT, cell_text(row[0]), V]
-            for col in range(1, len(row)):
-                line.append(cell_text(row[col]))
-                if col < len(row)-1:
-                    line.append(V)
+        lines = [f"   [{shape} shape]  frets {s}–{e}", "".join(header), "".join(marker)]
+        for si,row in enumerate(reversed(sub)):
+            string_num = si+1
+            string_label = f"{string_num}({TUNING[::-1][si]})"
+            line = [f"{string_label:<4}", NUT, cell_text(row[0]), V] + [cell_text(c)+(V if f<len(row)-2 else "") for f,c in enumerate(row[1:],1)]
             lines.append(" ".join(line))
+        blocks.append("\n".join(lines)+"\n")
+    return "\n".join(blocks+legend_lines)
 
-        blocks.append("\n".join(hdr + [header_line, marker_line] + lines + [""]))
-    return "\n".join(blocks + legend_lines)
+# ---------------- Strict PENTATONIC CAGED (5 canonical boxes) ----------------
+
+def relative_minor_pc(major_pc: int) -> int:
+    return (major_pc - 3) % 12  # major -> relative minor down 3 semitones
+
+def relative_major_pc(minor_pc: int) -> int:
+    return (minor_pc + 3) % 12  # minor -> relative major up 3 semitones
+
+def pent_caged_windows(root_pc: int, frets: int, orient: str) -> List[Tuple[int,int,int]]:
+    """
+    Pattern 1 anchored to the low-E root of the chosen orientation:
+      - orient='minor' → use minor-pent root on low E
+      - orient='major' → use major-pent root on low E
+    Returns list of (start,end,pattern_index 1..5).
+    Uses canonical ~4-fret spans per box with practical overlaps.
+    """
+    start = first_low_e_root_fret(root_pc)
+
+    # Canonical-ish spans (width 4 frets) relative to Pattern 1 start
+    # P1: s..s+3, P2: s+2..s+5, P3: s+4..s+7, P4: s+5..s+8, P5: s+7..s+10
+    offsets = [(0,3), (2,5), (4,7), (5,8), (7,10)]
+    wins = []
+    for i,(lo,hi) in enumerate(offsets, start=1):
+        s = max(0, start + lo)
+        e = min(frets, start + hi)
+        if s > e: s = e
+        wins.append((s,e,i))
+    return wins
+
+def render_pent_caged(scale7, grid, frets: int, root_pc: int, legend_lines, ascii_mode: bool):
+    NUT, V = ("||","|") if ascii_mode else ("║","│")
+    wins = pent_caged_windows(root_pc, frets, orient="minor")  # root_pc already set for chosen orient by caller
+    blocks = []
+    for (s,e,pat) in wins:
+        header = ["    ", f"{NUT} "] + [f"{f:>2} " + (" " if f<e else "") for f in range(max(1,s), e+1)]
+        marker = ["    ", f"{NUT} "] + [((f" * " if ascii_mode else f" • ") if f in FRET_MARKERS else "   ") + (" " if f<e else "") for f in range(max(1,s), e+1)]
+        sub = slice_grid(grid, s, e)
+        title = f"   [Pentatonic Pattern {pat}]  frets {s}–{e}"
+        lines = [title, "".join(header), "".join(marker)]
+        for si,row in enumerate(reversed(sub)):
+            string_num = si+1
+            string_label = f"{string_num}({TUNING[::-1][si]})"
+            line = [f"{string_label:<4}", NUT, cell_text(row[0]), V] + [cell_text(c)+(V if f<len(row)-2 else "") for f,c in enumerate(row[1:],1)]
+            lines.append(" ".join(line))
+        blocks.append("\n".join(lines)+"\n")
+    return "\n".join(blocks+legend_lines)
 
 # ---------------- CLI ----------------
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Readable fretboard mapper (high strings on top, wound at bottom) with scales, pentatonics, chord tones & CAGED windows"
-    )
+    ap = argparse.ArgumentParser(description="Fretboard mapper with scales, pentatonics, chord tones & CAGED windows")
     ap.add_argument("--key", required=True, help="Key root, e.g. A, F#, Db, C#")
-    ap.add_argument("--mode", choices=["major","natural_minor"], default="major",
-                    help="For diatonic view OR to choose default pent flavor in auto mode")
-    ap.add_argument("--show", choices=["scale","pent"], default="scale",
-                    help="Show full diatonic scale or pentatonic set")
-    ap.add_argument("--pent", choices=["auto","major","minor"], default="auto",
-                    help="Which pentatonic to use (auto picks major for major keys, minor for natural minor)")
-    ap.add_argument("--tones", choices=["all","triad","seventh"], default="all",
-                    help="When --degree is set: show only triad (R/3/5) or seventh (R/3/5/7) tones; otherwise ignored")
-    ap.add_argument("--degree", type=str, default=None,
-                    help="Diatonic Roman numeral to highlight chord tones across the neck (e.g., I, ii, iii, IV, V, vi, vii°)")
-    ap.add_argument("--boxes", choices=["caged"], default=None,
-                    help="Show five approximate C-A-G-E-D windows instead of a single full-width grid")
-    ap.add_argument("--frets", type=int, default=12, help="Number of frets to display (max 24)")
-    ap.add_argument("--ascii", action="store_true", help="Use ASCII instead of Unicode box-drawing/flat symbols")
+    ap.add_argument("--mode", choices=["major","natural_minor"], default="major")
+    ap.add_argument("--show", choices=["scale","pent"], default="scale")
+    ap.add_argument("--pent", choices=["auto","major","minor"], default="auto")
+    ap.add_argument("--tones", choices=["all","triad","seventh"], default="all")
+    ap.add_argument("--degree", type=str, default=None)
+    ap.add_argument("--boxes", choices=["caged","pent-caged"], default=None)
+    ap.add_argument("--pent-orient", choices=["minor","major"], default="minor",
+                    help="For --boxes pent-caged: align Pattern 1 to this pentatonic root on the low E string")
+    ap.add_argument("--frets", type=int, default=12)
+    ap.add_argument("--ascii", action="store_true")
     args = ap.parse_args()
 
     frets = max(1, min(args.frets, 24))
-    mode = "major" if args.mode == "major" else "natural_minor"
-    show = args.show
-    pent_choice = args.pent
-    tones = args.tones
-    use_unicode_flat = not args.ascii
+    # Ensure boxed views have enough neck to avoid truncating later patterns
+    if args.boxes in ('caged', 'pent-caged'):
+        frets = max(frets, 24)
 
-    # Build baseline diatonic scale (always for legends, and for 'scale' view)
+    mode = "major" if args.mode=="major" else "natural_minor"
     scale = build_scale_spelled(args.key, mode)
+    ascii_mode = bool(args.ascii)
 
-    # Decide WHAT to label on the grid
+    # Decide WHAT to plot
     if args.degree:
         idx = degree_index_from_roman(args.degree, mode)
-        if idx is None:
-            raise SystemExit(f"Invalid --degree '{args.degree}' for {mode} mode. Try one of: "
-                             f"{', '.join(DEGREE_TO_ROMAN_MAJOR if mode=='major' else DEGREE_TO_ROMAN_NMIN)}")
-        if tones == "all":
-            # default to seventh for clarity when a degree is provided
-            tones = "seventh"
-        pc_to_label = label_map_chord_tones(scale, idx, tones, use_unicode_flat)
-        legend_mode = f"View: Chord tones for {args.degree} ({'triad' if tones=='triad' else 'seventh'})"
+        if idx is None: raise SystemExit(f"Invalid --degree {args.degree}")
+        tones = "seventh" if args.tones=="all" else args.tones
+        pc_to_label = label_map_chord_tones(scale, idx, tones, not ascii_mode)
+        legend_mode = f"View: Chord tones for {args.degree} ({tones})"
     else:
-        if show == "scale":
+        # Pentatonic or full scale
+        if args.show=="scale":
             pc_to_label = degree_map_diatonic(scale)
-            legend_mode = f"View: Full scale ({'major' if mode=='major' else 'natural minor'})"
+            legend_mode = f"View: Full scale ({mode})"
         else:
-            if pent_choice == "auto":
-                pc_to_label = label_map_pentatonic(args.key, mode, use_unicode_flat)
-                legend_mode = f"View: Pentatonic (auto → {'major' if mode=='major' else 'minor'})"
-                pent_choice = "major" if mode == "major" else "minor"
+            # decide pent flavor
+            if args.pent=="auto":
+                pc_to_label = label_map_pentatonic(args.key, mode, not ascii_mode)
+                pent_flavor = "major" if mode=="major" else "minor"
+                legend_mode = f"View: Pentatonic (auto→{pent_flavor})"
             else:
-                pc_to_label = label_map_pent_forced(args.key, pent_choice, use_unicode_flat)
-                legend_mode = f"View: Pentatonic ({pent_choice})"
+                pc_to_label = label_map_pent_forced(args.key, args.pent, not ascii_mode)
+                pent_flavor = args.pent
+                legend_mode = f"View: Pentatonic ({pent_flavor})"
 
     grid = build_grid(pc_to_label, frets)
+    legend_lines = [
+        "Scale: " + " ".join(scale),
+        legend_mode,
+        "Legend: R=root, numbers=degrees; b3/♭3, b7/♭7 as applicable"
+    ]
 
-    legend_scale = "Scale: " + " ".join(scale)
-    legend = "Legend: R = root, numbers = degrees; b3/♭3 and b7/♭7 as applicable; blank = not shown"
-    legend_lines = [legend_scale, legend_mode, legend]
+    # Determine root pitch-class for windowing
+    key_root_pc = pc_of_note_name(scale[0])
 
-    root_pc = pc_of_note_name(scale[0])
+    if args.boxes == "pent-caged":
+        # We need to anchor Pattern 1 to requested orientation's root on low E.
+        if args.pent == "auto":
+            active_pent = "major" if mode=="major" else "minor"
+        else:
+            active_pent = args.pent
 
-    if args.boxes == "caged":
-        out = render_caged_ascii(scale, grid, frets, root_pc, legend_lines) if args.ascii \
-              else render_caged_unicode(scale, grid, frets, root_pc, legend_lines)
+        if args.pent_orient == "minor":
+            anchor_pc = relative_minor_pc(key_root_pc) if active_pent == "major" else key_root_pc
+            out = render_pent_caged(scale, grid, frets, anchor_pc, legend_lines, ascii_mode)
+        else:
+            anchor_pc = relative_major_pc(key_root_pc) if active_pent == "minor" else key_root_pc
+            out = render_pent_caged(scale, grid, frets, anchor_pc, legend_lines, ascii_mode)
+    elif args.boxes == "caged":
+        out = (render_caged_ascii if ascii_mode else render_caged_unicode)(
+            scale, grid, frets, key_root_pc, legend_lines
+        )
     else:
-        out = render_single_ascii(scale, grid, frets, legend_lines) if args.ascii \
-              else render_single_unicode(scale, grid, frets, legend_lines)
+        out = (render_single_ascii if ascii_mode else render_single_unicode)(
+            scale, grid, frets, legend_lines
+        )
     print(out)
 
 if __name__ == "__main__":
